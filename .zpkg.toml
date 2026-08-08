@@ -1,0 +1,23 @@
+[package]
+org = "flags-2-env-test"
+name = "sops-just-nix-zpkg"
+version = "0.1.0"
+description = "sops + just + nix + zed-pkg fixture: proves a package publish cannot carry plaintext env"
+license = "MIT"
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/flags-2-env-test/sops-just-nix-zpkg"
+
+[publish]
+include_readme = true
+tag_format = "v{version}"
+# The point of this fixture. A publish must never carry decrypted env or the
+# private key; only the committed ciphertext may ship.
+exclude = [
+  ".env",
+  ".env.*",
+  "env/dec/**",
+  "age.key",
+  ".direnv/**",
+]
