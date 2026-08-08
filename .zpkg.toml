@@ -1,0 +1,23 @@
+[package]
+org = "flags-2-env-test"
+name = "sops-just-nix-zpkg"
+version = "0.2.0"
+description = "Runtime-generated SOPS + Just + Nix + Zed package leak-prevention fixture"
+license = "MIT"
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/flags-2-env-test/sops-just-nix-zpkg"
+
+[publish]
+include_readme = true
+tag_format = "v{version}"
+exclude = [
+  ".env",
+  ".env.*",
+  "env/dec/**",
+  ".fixture-runtime/**",
+  ".fixture.sops.yaml",
+  ".direnv/**",
+  "_tooling/**",
+]
