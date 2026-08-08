@@ -1,0 +1,207 @@
+name: One-shot staged SOPS zpkg verifier
+
+on:
+  push:
+    branches: [agent/den-2919-runtime-zpkg]
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout candidate branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Materialize candidate from green Just+Nix reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          git clone --depth 1 https://github.com/flags-2-env-test/sops-just-nix.git "$tmp/reference"
+          for path in .dockerignore .gitattributes .gitignore Dockerfile EXPECTED.md flake.nix justfile scripts fixtures; do
+            rm -rf -- "$path"
+            cp -R "$tmp/reference/$path" "$path"
+          done
+          rm -rf -- "$tmp"
+
+          cat > .zpkg.toml <<'EOF'
+          [package]
+          org = "flags-2-env-test"
+          name = "sops-just-nix-zpkg"
+          version = "0.2.0"
+          description = "Runtime-generated SOPS + Just + Nix + Zed package leak-prevention fixture"
+          license = "MIT"
+
+          [package.repository]
+          vcs = "git"
+          url = "https://github.com/flags-2-env-test/sops-just-nix-zpkg"
+
+          [publish]
+          include_readme = true
+          tag_format = "v{version}"
+          exclude = [
+            ".env",
+            ".env.*",
+            "env/dec/**",
+            ".fixture-runtime/**",
+            ".fixture.sops.yaml",
+            ".direnv/**",
+            "_tooling/**",
+          ]
+          EOF
+
+          cat > README.md <<'EOF'
+          # sops-just-nix-zpkg
+
+          Runtime-generated security fixture for **SOPS + Just + Nix + Zed package** interoperability.
+
+          Private age identities, temporary SOPS config, canonical runtime ciphertext, decrypted `env/dec/**`, and root `.env` are created only during tests and removed afterward. No private identity or decrypted dotenv is committed.
+
+          CI runs the same hardened contract as `sops-just-nix`, then builds a pinned Zed CLI and proves that a package archive cannot contain root plaintext dotenv, decrypted env files, runtime identity state, temporary SOPS config, or the pinned test toolchain. All values are synthetic.
+          EOF
+
+          cat > scripts/assert-zpkg.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          [[ $# -eq 1 ]] || { echo 'usage: assert-zpkg.sh /path/to/zed' >&2; exit 2; }
+          zed="$1"
+          [[ -x "$zed" ]] || { echo "zed binary not executable: $zed" >&2; exit 2; }
+          cleanup() { rm -rf -- .fixture-runtime env/dec env/enc .env .fixture.sops.yaml .zed; }
+          trap cleanup EXIT HUP INT TERM
+          cleanup
+          mkdir -p .fixture-runtime env/dec
+          printf 'AGE-SECRET-KEY-SYNTHETIC-DO-NOT-USE\n' > .fixture-runtime/age.key
+          chmod 600 .fixture-runtime/age.key
+          printf 'SYNTHETIC_DEV=not-a-secret\n' > env/dec/dev.env
+          chmod 600 env/dec/dev.env
+          ln -s env/dec/dev.env .env
+          printf 'creation_rules: []\n' > .fixture.sops.yaml
+          out="$(mktemp -d "${TMPDIR:-/tmp}/sops-zpkg-pack.XXXXXX")"
+          "$zed" pack --out "$out" >/dev/null
+          archive="$(find "$out" -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          [[ -n "$archive" ]]
+          tar -tzf "$archive" > "$out/files.txt"
+          grep -Fxq 'pkg/.zpkg.toml' "$out/files.txt"
+          grep -Fxq 'pkg/fixtures/dev.fixture.dotenv' "$out/files.txt"
+          grep -Fxq 'pkg/fixtures/prod.fixture.dotenv' "$out/files.txt"
+          grep -Fxq 'pkg/scripts/assert.sh' "$out/files.txt"
+          ! grep -Eq '^pkg/(\.env($|\.)|env/dec/|\.fixture-runtime/|\.fixture\.sops\.yaml$|_tooling/)' "$out/files.txt"
+          ! tar -xOzf "$archive" 2>/dev/null | grep -Fq 'AGE-SECRET-KEY-SYNTHETIC-DO-NOT-USE'
+          ! tar -xOzf "$archive" 2>/dev/null | grep -Fq 'SYNTHETIC_DEV=not-a-secret'
+          echo 'runtime-generated SOPS Zed package exclusion contract: PASS'
+          EOF
+          chmod +x scripts/assert.sh scripts/assert-zpkg.sh
+
+          mkdir -p .github/workflows
+          cat > .github/workflows/runtime-sops-zpkg.yml <<'EOF'
+          name: runtime-generated SOPS Zed package fixture
+          on:
+            pull_request:
+            push:
+              branches: [main]
+            workflow_dispatch:
+          permissions:
+            contents: read
+          jobs:
+            verify:
+              runs-on: ubuntu-24.04
+              timeout-minutes: 40
+              steps:
+                - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+                  with:
+                    persist-credentials: false
+                - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+                  with:
+                    flakehub: false
+                - name: Verify Nix and Just contract
+                  run: |
+                    nix run --no-write-lock-file .#verify
+                    nix develop --no-write-lock-file --command just verify
+                - name: Verify container contract
+                  run: |
+                    docker build --tag sops-just-nix-zpkg-runtime .
+                    docker run --rm sops-just-nix-zpkg-runtime
+                - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+                  with:
+                    repository: zed-pkg/zed-interfaces
+                    ref: 07d01604461d00e237c7d86ad3855464167574ec
+                    path: _tooling/zed-interfaces
+                    persist-credentials: false
+                - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+                  with:
+                    repository: zed-pkg/zed-cli
+                    ref: 8d04bc598a4b0b464466cbec3c44d18cf2922137
+                    path: _tooling/zed-cli
+                    persist-credentials: false
+                - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+                  with:
+                    toolchain: stable
+                - name: Prove Zed package leak prevention
+                  run: |
+                    cargo build --locked --manifest-path _tooling/zed-cli/Cargo.toml
+                    ./scripts/assert-zpkg.sh "$GITHUB_WORKSPACE/_tooling/zed-cli/target/debug/zed"
+          EOF
+
+          printf '\n_tooling/\n' >> .gitignore
+          git add -A
+          git diff --cached --check
+
+      - name: Install pinned Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          flakehub: false
+
+      - name: Verify staged Nix and Just candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix run --no-write-lock-file .#verify
+          nix develop --no-write-lock-file --command just verify
+
+      - name: Verify clean container candidate
+        run: |
+          docker build --tag sops-just-nix-zpkg-runtime .
+          docker run --rm sops-just-nix-zpkg-runtime
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: 07d01604461d00e237c7d86ad3855464167574ec
+          path: _tooling/zed-interfaces
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: zed-pkg/zed-cli
+          ref: 8d04bc598a4b0b464466cbec3c44d18cf2922137
+          path: _tooling/zed-cli
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
+
+      - name: Prove Zed package leak prevention
+        run: |
+          cargo build --locked --manifest-path _tooling/zed-cli/Cargo.toml
+          ./scripts/assert-zpkg.sh "$GITHUB_WORKSPACE/_tooling/zed-cli/target/debug/zed"
+
+      - name: Commit only verified permanent files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/agent-runtime-zpkg-v2.yml
+          rm -rf _tooling
+          git add -A
+          git diff --cached --check
+          git config user.name ORESoftware
+          git config user.email alex@oresoftware.com
+          git commit -m 'DEN-2919: runtime-generate SOPS zpkg identities'
+          git push origin HEAD:agent/den-2919-runtime-zpkg
