@@ -1,35 +1,20 @@
 # sops-just-nix-zpkg
 
-sops environment fixture for the toolchain combination: **sops + just + nix + zed-pkg**.
+Runtime-generated security fixture for **SOPS + Just + Nix + Zed package** interoperability.
 
-Part of a matrix that proves the sops `env/enc` ↔ `env/dec` pattern behaves
-identically across toolchains **and** on both sides of a container boundary.
-Same contract in every fixture (`scripts/assert.sh`); only the surrounding
-tooling differs.
+This lane uses the same hardened SOPS dotenv contract as the other `flags-2-env-test` matrix repositories. Private age identities, temporary SOPS config, canonical runtime ciphertext, decrypted `env/dec/**`, and root `.env` are created only while tests run and are removed afterward. **No private identity or decrypted dotenv is committed.**
 
-## Why the container half matters
+CI exercises the contract through pinned Nix/Just and a clean container. It then builds a pinned Zed CLI and deliberately creates synthetic plaintext/runtime identity files before `zed pack`; the resulting archive must exclude root `.env`, `env/dec/**`, `.fixture-runtime/**`, temporary SOPS config, and `_tooling/**` while retaining the neutral fixture sources and package metadata.
 
-Every defect this pattern has actually shipped was invisible from one side:
+All values are synthetic. No application credential or production SOPS identity is used.
 
-| Defect | Visible from |
-|---|---|
-| `dd … status=none` is GNU-only, so the secure overwrite silently no-opped | Linux only |
-| `python3` missing from the nix devshell | inside `nix develop` only |
-| k8s Secret named from `basename(pwd)` → `w-local` under a `/w` mount | container only |
-| `sops exec-env` needs `/bin/sh`, so it cannot run on distroless | container only |
-
-So each fixture asserts on the host **and** in Docker, and CI runs both.
-
-## Run it
+## Local verification
 
 ```sh
-just verify                 # host
-docker build -t sops-just-nix-zpkg . && docker run --rm sops-just-nix-zpkg   # container
+nix run --no-write-lock-file .#verify
+nix develop --no-write-lock-file --command just verify
+docker build -t sops-just-nix-zpkg-runtime .
+docker run --rm sops-just-nix-zpkg-runtime
 ```
 
-## The committed key is intentional
-
-`age.key` is a **throwaway** private key, committed so CI can decrypt with zero
-secrets configured. Every value it protects is fake. It exists to make the e2e
-real; never reuse it. In a production repo the private key is never committed —
-see the recipient-roster model in `.sops.yaml`.
+The Zed packaging assertion is run in CI with immutable `zed-cli` and `zed-interfaces` revisions.
