@@ -25,7 +25,7 @@ jobs:
         run: |
           set -euo pipefail
           source_base='https://raw.githubusercontent.com/flags-2-env-test/sops-just-nix/main'
-          mkdir -p scripts fixtures
+          mkdir -p scripts fixtures .github/workflows
           for path in .dockerignore .gitattributes .gitignore Dockerfile EXPECTED.md flake.nix justfile scripts/assert.sh fixtures/dev.fixture.dotenv fixtures/prod.fixture.dotenv; do
             mkdir -p "$(dirname "$path")"
             curl --fail --silent --show-error --location "$source_base/$path" -o "$path"
@@ -63,7 +63,7 @@ jobs:
 
           CI validates the contract through pinned Nix/Just and a clean container, then uses a pinned Zed CLI to package the repository while synthetic plaintext/runtime identity paths are present. The resulting archive must exclude `.env`, `env/dec/**`, `.fixture-runtime/**`, and temporary SOPS config while retaining the neutral fixture sources and package metadata.
 
-          All values are synthetic. No PAT, application credential, SOPS production identity, Cloudflare token, or R2 key is used.
+          All values are synthetic. No application credential, production SOPS identity, Cloudflare token, or R2 key is used.
           EOF
           cat > scripts/assert-zpkg.sh <<'EOF'
           #!/usr/bin/env bash
@@ -101,10 +101,86 @@ jobs:
           printf 'runtime-generated SOPS Zed package exclusion contract: PASS\n'
           EOF
           chmod +x scripts/assert.sh scripts/assert-zpkg.sh
+
+          cat > .github/workflows/runtime-sops-zpkg.yml <<'EOF'
+          name: runtime-generated SOPS Zed package fixture
+
+          on:
+            pull_request:
+            push:
+              branches: [main]
+            workflow_dispatch:
+
+          permissions:
+            contents: read
+
+          concurrency:
+            group: runtime-sops-zpkg-${{ github.workflow }}-${{ github.ref }}
+            cancel-in-progress: true
+
+          jobs:
+            verify:
+              runs-on: ubuntu-24.04
+              timeout-minutes: 35
+              steps:
+                - name: Checkout fixture
+                  uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                  with:
+                    persist-credentials: false
+
+                - name: Install pinned Nix
+                  uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+                  with:
+                    flakehub: false
+
+                - name: Verify pinned Nix and Just contract
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    nix run --no-write-lock-file .#verify
+                    nix develop --no-write-lock-file --command just verify
+
+                - name: Verify clean container contract
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    docker build --tag sops-just-nix-zpkg-runtime .
+                    docker run --rm sops-just-nix-zpkg-runtime
+
+                - name: Checkout pinned Zed interfaces
+                  uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+                  with:
+                    repository: zed-pkg/zed-interfaces
+                    ref: 07d01604461d00e237c7d86ad3855464167574ec
+                    path: zed-interfaces
+                    persist-credentials: false
+
+                - name: Checkout pinned Zed CLI
+                  uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+                  with:
+                    repository: zed-pkg/zed-cli
+                    ref: 8d04bc598a4b0b464466cbec3c44d18cf2922137
+                    path: zed-cli
+                    persist-credentials: false
+
+                - name: Install Rust
+                  uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+                  with:
+                    toolchain: stable
+
+                - name: Build Zed and prove package leak prevention
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    cargo build --locked --manifest-path zed-cli/Cargo.toml
+                    ./scripts/assert-zpkg.sh "$GITHUB_WORKSPACE/zed-cli/target/debug/zed"
+          EOF
           git diff --check
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a1480ea6a7fcf26022c9065f872b6f10ebf9f # v22
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          flakehub: false
 
       - name: Verify Just+Nix runtime identity contract
         shell: bash
@@ -136,7 +212,7 @@ jobs:
           path: zed-cli
           persist-credentials: false
 
-      - name: Build pinned Zed CLI
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           toolchain: stable
